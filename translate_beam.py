@@ -20,18 +20,20 @@ def get_args():
     parser.add_argument('--seed', default=42, type=int, help='pseudo random number generator seed')
 
     # Add data arguments
-    parser.add_argument('--data', default='assignments/03/prepared', help='path to data directory')
-    parser.add_argument('--dicts', required=True, help='path to directory containing source and target dictionaries')
-    parser.add_argument('--checkpoint-path', default='checkpoints_asg4/checkpoint_best.pt', help='path to the model file')
-    parser.add_argument('--batch-size', default=None, type=int, help='maximum number of sentences in a batch')
-    parser.add_argument('--output', default='model_translations.txt', type=str,
+    parser.add_argument('--data', default='data/en-fr/prepared', help='path to data directory')
+    parser.add_argument('--dicts', default='data/en-fr/prepared', help='path to directory containing source and target dictionaries')
+    parser.add_argument('--checkpoint-path', default='assignments/03/baseline/checkpoints/checkpoint_best.pt', help='path to the model file')
+    parser.add_argument('--batch-size', default=1, type=int, help='maximum number of sentences in a batch')
+    parser.add_argument('--output', default='beam_search_diversity/gamma_4/model_translations.txt', type=str,
                         help='path to the output file destination')
     parser.add_argument('--max-len', default=100, type=int, help='maximum length of generated sequence')
 
     # Add beam search arguments
-    parser.add_argument('--beam-size', default=5, type=int, help='number of hypotheses expanded in beam search')
+    parser.add_argument('--beam-size', default=13, type=int, help='number of hypotheses expanded in beam search')
     # alpha hyperparameter for length normalization (described as lp in https://arxiv.org/pdf/1609.08144.pdf equation 14)
     parser.add_argument('--alpha', default=0.0, type=float, help='alpha for softer length normalization')
+
+    parser.add_argument('--gamma', default=4.0, type=float, help='Diverse N-best List')
 
     return parser.parse_args()
 
@@ -44,6 +46,7 @@ def main(args):
     args_loaded = argparse.Namespace(**{**vars(state_dict['args']), **vars(args)})
     args = args_loaded
     utils.init_logging(args)
+    string_result = []
 
     # Load dictionaries
     src_dict = Dictionary.load(os.path.join(args.dicts, 'dict.{:s}'.format(args.source_lang)))
@@ -101,8 +104,17 @@ def main(args):
             for j in range(args.beam_size):
                 best_candidate = next_candidates[i, :, j]
                 backoff_candidate = next_candidates[i, :, j+1]
+                #
+                # if args.gamma>0:
+                #     best_log_p = log_probs[i, :, j] - args.gamma*(j+1)
+                #     backoff_log_p = log_probs[i, :, j + 1] - args.gamma*(j+1)
+                # else:
+                #     best_log_p = log_probs[i, :, j]
+                #     backoff_log_p = log_probs[i, :, j+1]
+
                 best_log_p = log_probs[i, :, j]
-                backoff_log_p = log_probs[i, :, j+1]
+                backoff_log_p = log_probs[i, :, j + 1]
+
                 next_word = torch.where(best_candidate == tgt_dict.unk_idx, backoff_candidate, best_candidate)
                 log_p = torch.where(best_candidate == tgt_dict.unk_idx, backoff_log_p, best_log_p)
                 log_p = log_p[-1]
@@ -156,8 +168,12 @@ def main(args):
 
                     best_candidate = next_candidates[i, :, j]
                     backoff_candidate = next_candidates[i, :, j+1]
-                    best_log_p = log_probs[i, :, j]
-                    backoff_log_p = log_probs[i, :, j+1]
+                    if args.gamma>0:
+                        best_log_p = log_probs[i, :, j] - args.gamma*(j+1)
+                        backoff_log_p = log_probs[i, :, j + 1] - args.gamma*(j+1)
+                    else:
+                        best_log_p = log_probs[i, :, j]
+                        backoff_log_p = log_probs[i, :, j+1]
                     next_word = torch.where(best_candidate == tgt_dict.unk_idx, backoff_candidate, best_candidate)
                     log_p = torch.where(best_candidate == tgt_dict.unk_idx, backoff_log_p, best_log_p)
                     log_p = log_p[-1]
@@ -195,7 +211,21 @@ def main(args):
                 search.prune()
 
         # Segment into sentences
-        best_sents = torch.stack([search.get_best()[1].sequence[1:].cpu() for search in searches])
+        # best_sents = torch.stack([search.get_best()[1].sequence[1:].cpu() for search in searches])
+
+
+        # get all beam result of first sentence of
+        best_sents = torch.stack([search[2].sequence[1:].cpu() for search in searches[0].get_topK()])
+        if len(searches)>1:
+            for num in range(1, len(searches)):
+                try:
+                    batch_1 = torch.stack([search[2].sequence[1:].cpu() for search in searches[num].get_topK()])
+                    best_sents = torch.concat([best_sents, batch_1])
+                except:
+                    pass
+
+
+
         decoded_batch = best_sents.numpy()
         #import pdb;pdb.set_trace()
 
@@ -214,15 +244,23 @@ def main(args):
         # Convert arrays of indices into strings of words
         output_sentences = [tgt_dict.string(sent) for sent in output_sentences]
 
-        for ii, sent in enumerate(output_sentences):
-            all_hyps[int(sample['id'].data[ii])] = sent
+        # set batch size 1
+        string_result.append('\n'.join(output_sentences))
+        string_result.append('\n')
 
+        # for ii, sent in enumerate(output_sentences):
+        #     all_hyps[int(sample['id'].data[ii])] = sent
+
+
+    # # Write to file
+    # if args.output is not None:
+    #     with open(args.output, 'w') as out_file:
+    #         for sent_id in range(len(all_hyps.keys())):
+    #             out_file.write(all_hyps[sent_id] + '\n')
 
     # Write to file
-    if args.output is not None:
-        with open(args.output, 'w') as out_file:
-            for sent_id in range(len(all_hyps.keys())):
-                out_file.write(all_hyps[sent_id] + '\n')
+    with open(args.output, 'w') as f:
+        f.write('\n'.join(string_result))
 
 
 if __name__ == '__main__':

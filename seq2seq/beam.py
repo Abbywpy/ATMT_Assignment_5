@@ -53,6 +53,13 @@ class BeamSearch(object):
         node = (node[0], node[2])
 
         return node
+    def get_topK(self):
+        result = []
+        for _ in range(self.final.qsize()):
+            result.append(self.final.get())
+        for _ in range(self.nodes.qsize()):
+            result.append(self.nodes.get())
+        return result
 
     def prune(self):
         """ Removes all nodes but the beam_size best ones (lowest neg log prob) """
@@ -84,15 +91,14 @@ class BeamSearchNode(object):
         self.search = search
 
     def eval(self, alpha=0.0):
-        """ Returns score of sequence up to this node 
+        """ Returns score of sequence up to this node
 
-        params: 
+        params:
             :alpha float (default=0.0): hyperparameter for
             length normalization described in in
             https://arxiv.org/pdf/1609.08144.pdf (equation
             14 as lp), default setting of 0.0 has no effect
-        
+
         """
         normalizer = (5 + self.length)**alpha / (5 + 1)**alpha
         return self.logp / normalizer
-        
